@@ -12,6 +12,9 @@ pub struct PlatformSpecificWindowBuilderAttributes {
     pub parent: Option<HWND>,
     pub taskbar_icon: Option<::Icon>,
     pub no_redirection_bitmap: bool,
+    /// Allows the user to register a callback that is called when the
+    /// WM_CREATE is emitted, allows to register application menus and context menus.
+    pub wm_create_callback: Option<fn(HWND) -> ()>,
 }
 
 unsafe impl Send for PlatformSpecificWindowBuilderAttributes {}

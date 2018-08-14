@@ -58,6 +58,18 @@ pub trait WindowBuilderExt {
 
     /// This sets `WS_EX_NOREDIRECTIONBITMAP`.
     fn with_no_redirection_bitmap(self, flag: bool) -> WindowBuilder;
+
+    /// When the window is crated, Windows emits a `WM_CREATE` message. This is the
+    /// time where you can register application menus, context menus and
+    /// custom window message IDs. Note that all the message IDs (ex. to track which
+    /// context menu item was clicked) will come back to you in the form of
+    /// `WindowEvent::Command(your_event_id)`.
+    ///
+    /// Due to multithreading-unsafety of the Win32 API, this can't be a regular
+    /// message in the `EventsLoop`, since the `EventsLoop` is asynchronous and
+    /// Windows will freeze the application if you try to add menus from another thread.
+    /// The callback will be called immediately after the window has been created.
+    fn with_create_callback(self, callback: fn(HWND) -> ()) -> WindowBuilder;
 }
 
 impl WindowBuilderExt for WindowBuilder {
@@ -76,6 +88,12 @@ impl WindowBuilderExt for WindowBuilder {
     #[inline]
     fn with_no_redirection_bitmap(mut self, flag: bool) -> WindowBuilder {
         self.platform_specific.no_redirection_bitmap = flag;
+        self
+    }
+
+    #[inline]
+    fn with_create_callback(mut self, callback: fn(HWND) -> ()) -> WindowBuilder {
+        self.platform_specific.wm_create_callback = Some(callback);
         self
     }
 }
