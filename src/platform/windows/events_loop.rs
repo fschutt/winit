@@ -1112,31 +1112,82 @@ pub unsafe extern "system" fn callback(
 
         // Test: Handle WM_NCCALCSIZE for non-client extended window frame handling
         // NOTE: Is wparam as i32 safe?
-        winuser::WM_NCCALCSIZE if wparam == 1 => {
+        winuser::WM_NCCALCSIZE => {
 
-            use self::winuser::NCCALCSIZE_PARAMS;
+            if wparam != 0 {
 
-            // The border inset to the window where the window can be dragged and resized by the user
-            // TODO: Increase this to something reasonable
-            const OFFSET_DRAG_WINDOW: i32 = 0;
+                use self::winuser::NCCALCSIZE_PARAMS;
 
-            // Original C code uses reinterpret_cast here.
-            let non_client_size_params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+                // The border inset to the window where the window can be dragged and resized by the user
+                // TODO: Increase this to something reasonable
+                const OFFSET_DRAG_WINDOW: i32 = 0;
 
-            non_client_size_params.rgrc[0].left   = non_client_size_params.rgrc[0].left   + OFFSET_DRAG_WINDOW;
-            non_client_size_params.rgrc[0].top    = non_client_size_params.rgrc[0].top    + OFFSET_DRAG_WINDOW;
-            non_client_size_params.rgrc[0].right  = non_client_size_params.rgrc[0].right  - OFFSET_DRAG_WINDOW;
-            non_client_size_params.rgrc[0].bottom = non_client_size_params.rgrc[0].bottom - OFFSET_DRAG_WINDOW;
+                // Original C code uses reinterpret_cast here.
+                let non_client_size_params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
 
-            // No need to pass the message on to the DefWindowProc.
-            // fCallDWP = false;
+                non_client_size_params.rgrc[0].left   = non_client_size_params.rgrc[0].left   + OFFSET_DRAG_WINDOW;
+                non_client_size_params.rgrc[0].top    = non_client_size_params.rgrc[0].top    + OFFSET_DRAG_WINDOW;
+                non_client_size_params.rgrc[0].right  = non_client_size_params.rgrc[0].right  - OFFSET_DRAG_WINDOW;
+                non_client_size_params.rgrc[0].bottom = non_client_size_params.rgrc[0].bottom - OFFSET_DRAG_WINDOW;
 
-            0
+                // No need to pass the message on to the DefWindowProc.
+                // fCallDWP = false;
+
+                0
+            } else {
+                1
+            }
         },
 
         winuser::WM_NCACTIVATE => {
             extend_into_client_area(window);
             0
+        },
+
+        winuser::WM_NCHITTEST => {
+            // use winapi::um::dwmapi::DwmDefWindowProc;
+            use self::winuser::{DefWindowProcW, ScreenToClient};
+
+            // Handle close / minimize / maximize / help button
+            /*
+            if let Some(wndproc) = DwmDefWindowProc {
+                let mut hit_test_non_client_area: LRESULT = unsafe { mem::zeroed() };
+
+                if unsafe { wndproc(window, msg, wparam, lparam, &hit_test_non_client_area) } == 0 {
+                    return hit_test_non_client_area;
+                } else {
+            */
+
+                    // Do default hit testing, except change the result for caption area
+                    let hit_test_non_client_area = DefWindowProcW(window, msg, wparam, lparam);
+
+                    const BORDER_THICKNESS_TOP: i32 = 0;
+
+                    if hit_test_non_client_area != winuser::HTCLIENT {
+                        return hit_test_non_client_area;
+                    }
+
+                    let mut pt = POINT { x: LOWORD(lparam as DWORD) as i32, y:  HIWORD(lparam as DWORD) as i32 };
+
+                    ScreenToClient(window, &mut pt); // TODO: error checking?
+
+                    if pt.y < BORDER_THICKNESS_TOP {
+                        return winuser::HTTOP
+                    };
+
+                    if pt.y < WINDOW_MARGINS.cyTopHeight {
+                        return winuser::HTCAPTION
+                    };
+
+                    hit_test_non_client_area
+            /*
+                }
+
+                hit_test_non_client_area
+            } else {
+                return 1;
+            }
+            */
         },
 
         _ => {
@@ -1228,27 +1279,28 @@ fn force_window_resize(hwnd: HWND) -> Option<()> {
     Some(())
 }
 
+use winapi::um::uxtheme::MARGINS;
+
+const LEFTEXTENDWIDTH: i32 = 8;
+const RIGHTEXTENDWIDTH: i32 = 8;
+const BOTTOMEXTENDWIDTH: i32 = 20;
+const TOPEXTENDWIDTH: i32 = 27;
+
+const WINDOW_MARGINS: MARGINS = MARGINS {
+    cxLeftWidth: LEFTEXTENDWIDTH,
+    cxRightWidth: RIGHTEXTENDWIDTH,
+    cyBottomHeight: BOTTOMEXTENDWIDTH,
+    cyTopHeight: TOPEXTENDWIDTH,
+};
+
 fn extend_into_client_area(hwnd: HWND) {
 
-    use winapi::um::uxtheme::MARGINS;
     use winapi::um::dwmapi::DwmExtendFrameIntoClientArea;
 
     println!("in function extend_into_client_area!");
 
-    const LEFTEXTENDWIDTH: i32 = 8;
-    const RIGHTEXTENDWIDTH: i32 = 8;
-    const BOTTOMEXTENDWIDTH: i32 = 20;
-    const TOPEXTENDWIDTH: i32 = 27;
-
     // Extend the frame into the client area.
-    let margins = MARGINS {
-        cxLeftWidth: LEFTEXTENDWIDTH,
-        cxRightWidth: RIGHTEXTENDWIDTH,
-        cyBottomHeight: BOTTOMEXTENDWIDTH,
-        cyTopHeight: TOPEXTENDWIDTH,
-    };
-
-    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &WINDOW_MARGINS) };
 
     if extend_frame_result == 0 {
         println!("Could not extend window into client area: {:x}", hwnd as usize);
