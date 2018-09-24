@@ -32,6 +32,7 @@ use winapi::shared::minwindef::{
     MAX_PATH,
     UINT,
     WPARAM,
+    TRUE,
 };
 use winapi::shared::windef::{HWND, POINT, RECT};
 use winapi::shared::windowsx;
@@ -425,6 +426,7 @@ pub unsafe extern "system" fn callback(
     match msg {
         winuser::WM_NCCREATE => {
             enable_non_client_dpi_scaling(window);
+            force_window_resize(window);
             winuser::DefWindowProcW(window, msg, wparam, lparam)
         },
 
@@ -1108,6 +1110,35 @@ pub unsafe extern "system" fn callback(
             0
         },
 
+        // Test: Handle WM_NCCALCSIZE for non-client extended window frame handling
+        // NOTE: Is wparam as i32 safe?
+        winuser::WM_NCCALCSIZE if wparam == 1 => {
+
+            use self::winuser::NCCALCSIZE_PARAMS;
+
+            // The border inset to the window where the window can be dragged and resized by the user
+            // TODO: Increase this to something reasonable
+            const OFFSET_DRAG_WINDOW: i32 = 0;
+
+            // Original C code uses reinterpret_cast here.
+            let non_client_size_params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+
+            non_client_size_params.rgrc[0].left   = non_client_size_params.rgrc[0].left   + OFFSET_DRAG_WINDOW;
+            non_client_size_params.rgrc[0].top    = non_client_size_params.rgrc[0].top    + OFFSET_DRAG_WINDOW;
+            non_client_size_params.rgrc[0].right  = non_client_size_params.rgrc[0].right  - OFFSET_DRAG_WINDOW;
+            non_client_size_params.rgrc[0].bottom = non_client_size_params.rgrc[0].bottom - OFFSET_DRAG_WINDOW;
+
+            // No need to pass the message on to the DefWindowProc.
+            // fCallDWP = false;
+
+            0
+        },
+
+        winuser::WM_NCACTIVATE => {
+            extend_into_client_area(window);
+            0
+        },
+
         _ => {
             if msg == *DESTROY_MSG_ID {
                 winuser::DestroyWindow(window);
@@ -1157,4 +1188,72 @@ pub unsafe extern "system" fn callback(
             }
         }
     }
+}
+
+// For the extended window frame to take effect, the window has to get a WM_NCCALCSIZE
+// message on startup. This function does nothing visually, it essentially calls `set_position`
+// with the exact dimensions and placement of the window on the screen. This re-emits a `WM_NCCALCSIZE`
+// message so that the first frame of the window appearing on the screen is drawn without a frame.
+//
+// After this call, return 0
+fn force_window_resize(hwnd: HWND) -> Option<()> {
+    use std::ptr;
+
+    println!("in function force_window_resize!");
+
+    let mut window_rect: RECT = unsafe { mem::zeroed() };
+    let window_result = unsafe { winuser::GetWindowRect(hwnd, &mut window_rect) };
+
+    if window_result == 0  {
+        println!("Could not get window position for {:x}", hwnd as usize);
+        return None;
+    }
+
+    // TODO: Check for errors
+    // (rc).right - (rc).left
+    let rect_width = window_rect.right - window_rect.left;
+    let rect_height = window_rect.bottom - window_rect.top;
+
+    // Inform the application of the frame change.
+    let set_window_pos_result = unsafe { winuser::SetWindowPos(hwnd, ptr::null_mut(), window_rect.left, window_rect.top, rect_width, rect_height, winuser::SWP_FRAMECHANGED) };
+
+    if set_window_pos_result == 0 {
+        println!("Could not set window position of window {:x}", hwnd as usize);
+        return None;
+    }
+
+    // fCallDWP = true;
+    // lRet = 0;
+
+    Some(())
+}
+
+fn extend_into_client_area(hwnd: HWND) {
+
+    use winapi::um::uxtheme::MARGINS;
+    use winapi::um::dwmapi::DwmExtendFrameIntoClientArea;
+
+    println!("in function extend_into_client_area!");
+
+    const LEFTEXTENDWIDTH: i32 = 8;
+    const RIGHTEXTENDWIDTH: i32 = 8;
+    const BOTTOMEXTENDWIDTH: i32 = 20;
+    const TOPEXTENDWIDTH: i32 = 27;
+
+    // Extend the frame into the client area.
+    let margins = MARGINS {
+        cxLeftWidth: LEFTEXTENDWIDTH,
+        cxRightWidth: RIGHTEXTENDWIDTH,
+        cyBottomHeight: BOTTOMEXTENDWIDTH,
+        cyTopHeight: TOPEXTENDWIDTH,
+    };
+
+    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
+
+    if extend_frame_result == 0 {
+        println!("Could not extend window into client area: {:x}", hwnd as usize);
+        return;
+    }
+
+    println!("Enabled custom client frame!");
 }
