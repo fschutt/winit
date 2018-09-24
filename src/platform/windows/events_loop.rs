@@ -20,6 +20,8 @@ use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
 use std::sync::{Arc, Barrier, mpsc, Mutex};
 
+use winapi::shared::winerror::S_OK;
+use winapi::um::dwmapi::{DwmEnableComposition, DwmIsCompositionEnabled, DWM_EC_ENABLECOMPOSITION};
 use winapi::ctypes::c_int;
 use winapi::shared::minwindef::{
     BOOL,
@@ -32,7 +34,6 @@ use winapi::shared::minwindef::{
     MAX_PATH,
     UINT,
     WPARAM,
-    TRUE,
 };
 use winapi::shared::windef::{HWND, POINT, RECT};
 use winapi::shared::windowsx;
@@ -425,6 +426,7 @@ pub unsafe extern "system" fn callback(
 ) -> LRESULT {
     match msg {
         winuser::WM_NCCREATE => {
+            enable_dwm_composition();
             enable_non_client_dpi_scaling(window);
             force_window_resize(window);
             winuser::DefWindowProcW(window, msg, wparam, lparam)
@@ -571,6 +573,19 @@ pub unsafe extern "system" fn callback(
 
         winuser::WM_MOUSELEAVE => {
             use events::WindowEvent::CursorLeft;
+            use winapi::um::dwmapi::DwmDefWindowProc;
+
+            let mut dwm_hittest_frame: LRESULT = mem::zeroed();
+            let dwm_hittest_result = DwmDefWindowProc(window, msg, wparam, lparam, &mut dwm_hittest_frame);
+
+            if dwm_hittest_result != S_OK {
+                error!("Could not do hit testing using DWM!")
+            }
+
+            if dwm_hittest_frame == 0 {
+                return 0; // TODO: Is this correct?
+            }
+
             let mouse_in_window = CONTEXT_STASH.with(|context_stash| {
                 let mut context_stash = context_stash.borrow_mut();
                 if let Some(context_stash) = context_stash.as_mut() {
@@ -1145,49 +1160,42 @@ pub unsafe extern "system" fn callback(
         },
 
         winuser::WM_NCHITTEST => {
-            // use winapi::um::dwmapi::DwmDefWindowProc;
+            use winapi::um::dwmapi::DwmDefWindowProc;
             use self::winuser::{DefWindowProcW, ScreenToClient};
 
+            const BORDER_THICKNESS_TOP: i32 = 0;
+
             // Handle close / minimize / maximize / help button
-            /*
-            if let Some(wndproc) = DwmDefWindowProc {
-                let mut hit_test_non_client_area: LRESULT = unsafe { mem::zeroed() };
+            let mut hit_test_non_client_area: LRESULT = mem::zeroed();
 
-                if unsafe { wndproc(window, msg, wparam, lparam, &hit_test_non_client_area) } == 0 {
-                    return hit_test_non_client_area;
-                } else {
-            */
-
-                    // Do default hit testing, except change the result for caption area
-                    let hit_test_non_client_area = DefWindowProcW(window, msg, wparam, lparam);
-
-                    const BORDER_THICKNESS_TOP: i32 = 0;
-
-                    if hit_test_non_client_area != winuser::HTCLIENT {
-                        return hit_test_non_client_area;
-                    }
-
-                    let mut pt = POINT { x: LOWORD(lparam as DWORD) as i32, y:  HIWORD(lparam as DWORD) as i32 };
-
-                    ScreenToClient(window, &mut pt); // TODO: error checking?
-
-                    if pt.y < BORDER_THICKNESS_TOP {
-                        return winuser::HTTOP
-                    };
-
-                    if pt.y < WINDOW_MARGINS.cyTopHeight {
-                        return winuser::HTCAPTION
-                    };
-
-                    hit_test_non_client_area
-            /*
-                }
-
-                hit_test_non_client_area
-            } else {
-                return 1;
+            if DwmDefWindowProc(window, msg, wparam, lparam, &mut hit_test_non_client_area) == 0 {
+                return hit_test_non_client_area;
             }
-            */
+
+            // Do default hit testing, except change the result for caption area
+            hit_test_non_client_area = DefWindowProcW(window, msg, wparam, lparam);
+
+            if hit_test_non_client_area != winuser::HTCLIENT {
+                return hit_test_non_client_area;
+            }
+
+            let mut pt = POINT { x: LOWORD(lparam as DWORD) as i32, y:  HIWORD(lparam as DWORD) as i32 };
+
+            let screen_to_client_result = ScreenToClient(window, &mut pt); // TODO: error checking?
+
+            if screen_to_client_result == 0 {
+                println!("error: could not transform screen to client!");
+            }
+
+            if pt.y < BORDER_THICKNESS_TOP {
+                return winuser::HTTOP
+            };
+
+            if pt.y < WINDOW_MARGINS.cyTopHeight {
+                return winuser::HTCAPTION
+            };
+
+            hit_test_non_client_area
         },
 
         _ => {
@@ -1238,6 +1246,26 @@ pub unsafe extern "system" fn callback(
                 winuser::DefWindowProcW(window, msg, wparam, lparam)
             }
         }
+    }
+}
+
+fn enable_dwm_composition() -> Option<()> {
+    let mut dwm_is_enabled = 1;
+    let dwm_ask_result = unsafe { DwmIsCompositionEnabled(&mut dwm_is_enabled) };
+
+    if dwm_ask_result == 0 {
+        return None;
+    }
+
+    if dwm_is_enabled == 0 {
+        return Some(());
+    }
+
+    let dwm_enable_composition_result = unsafe { DwmEnableComposition(DWM_EC_ENABLECOMPOSITION) };
+    if dwm_enable_composition_result == 0 {
+        None
+    } else {
+        Some(())
     }
 }
 
@@ -1293,19 +1321,22 @@ const WINDOW_MARGINS: MARGINS = MARGINS {
     cyTopHeight: TOPEXTENDWIDTH,
 };
 
+const WINDOW_MARGINS_2: MARGINS = MARGINS {
+    cxLeftWidth: -1,
+    cxRightWidth: -1,
+    cyBottomHeight: -1,
+    cyTopHeight: -1,
+};
+
 fn extend_into_client_area(hwnd: HWND) {
 
     use winapi::um::dwmapi::DwmExtendFrameIntoClientArea;
 
-    println!("in function extend_into_client_area!");
+    // Extend the frame into the client area
+    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &WINDOW_MARGINS_2) };
 
-    // Extend the frame into the client area.
-    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &WINDOW_MARGINS) };
-
-    if extend_frame_result == 0 {
-        println!("Could not extend window into client area: {:x}", hwnd as usize);
+    if extend_frame_result != S_OK {
+        error!("Could not extend window into client area: {:x}", hwnd as usize);
         return;
     }
-
-    println!("Enabled custom client frame!");
 }

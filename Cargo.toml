@@ -35,10 +35,14 @@ core-foundation = "0.6"
 core-graphics = "0.16"
 
 [target.'cfg(target_os = "windows")'.dependencies.winapi]
-version = "0.3.6"
+git = "https://github.com/retep998/winapi-rs"
+rev = "fc034bdc9a5cb299fd296b555e30b24c76bb4c5e"
 features = [
     "combaseapi",
     "dwmapi",
+    "winerror",
+    "errhandlingapi",
+    "winbase",
     "hidusage",
     "libloaderapi",
     "objbase",
