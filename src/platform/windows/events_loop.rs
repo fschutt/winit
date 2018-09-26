@@ -34,11 +34,13 @@ use winapi::shared::minwindef::{
     MAX_PATH,
     UINT,
     WPARAM,
+    FALSE,
 };
 use winapi::shared::windef::{HWND, POINT, RECT};
 use winapi::shared::windowsx;
 use winapi::um::{winuser, shellapi, processthreadsapi};
 use winapi::um::winnt::{LONG, LPCSTR, SHORT};
+use winapi::um::uxtheme::MARGINS;
 
 use {
     ControlFlow,
@@ -411,6 +413,38 @@ unsafe fn release_mouse() {
     });
 }
 
+/// Standard margins for Windows, when the window isn't maximized
+/// Taken from MSDN: https://docs.microsoft.com/de-de/windows/desktop/dwm/customframe
+const WINDOW_MARGINS_DEFAULT: MARGINS = MARGINS {
+    cxLeftWidth: 8,
+    cxRightWidth: 8,
+    cyBottomHeight: 20,
+    cyTopHeight: 27,
+};
+
+// const WINDOW_MARGINS_FULL: MARGINS = WINDOW_MARGINS_DEFAULT;
+
+
+/// "-1" is a special value for the DWM to extend the margins
+/// across the whole frame (no borders).
+const WINDOW_MARGINS_FULL: MARGINS = MARGINS {
+    cxLeftWidth: -1,
+    cxRightWidth: -1,
+    cyBottomHeight: -1,
+    cyTopHeight: -1,
+};
+
+/// Virtual borders where the window can be grabbed and resized -
+/// default is 7px on all windows, however the top has a special
+/// handling, due to the caption.
+const BORDER_THICKNESS: RECT = RECT {
+    left: 7,
+    top: 0,
+    right: 7,
+    bottom: 7,
+};
+
+
 /// Any window whose callback is configured to this function will have its events propagated
 /// through the events loop of the thread the window was created in.
 //
@@ -429,6 +463,11 @@ pub unsafe extern "system" fn callback(
             enable_dwm_composition();
             enable_non_client_dpi_scaling(window);
             force_window_resize(window);
+
+            let mut border_thickness = BORDER_THICKNESS;
+            winuser::AdjustWindowRectEx(&mut border_thickness,
+                (winuser::GetWindowLongPtrW(window, winuser::GWL_STYLE) & ((!winuser::WS_CAPTION) as isize)) as u32, FALSE, 0);
+
             winuser::DefWindowProcW(window, msg, wparam, lparam)
         },
 
@@ -582,8 +621,8 @@ pub unsafe extern "system" fn callback(
                 error!("Could not do hit testing using DWM!")
             }
 
-            if dwm_hittest_frame == 0 {
-                return 0; // TODO: Is this correct?
+            if dwm_hittest_frame != 0 {
+                return dwm_hittest_frame; // TODO: Is this correct?
             }
 
             let mouse_in_window = CONTEXT_STASH.with(|context_stash| {
@@ -1129,21 +1168,20 @@ pub unsafe extern "system" fn callback(
         // NOTE: Is wparam as i32 safe?
         winuser::WM_NCCALCSIZE => {
 
-            if wparam != 0 {
+            if lparam != 0 {
 
                 use self::winuser::NCCALCSIZE_PARAMS;
 
                 // The border inset to the window where the window can be dragged and resized by the user
                 // TODO: Increase this to something reasonable
-                const OFFSET_DRAG_WINDOW: i32 = 0;
 
                 // Original C code uses reinterpret_cast here.
                 let non_client_size_params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
 
-                non_client_size_params.rgrc[0].left   = non_client_size_params.rgrc[0].left   + OFFSET_DRAG_WINDOW;
-                non_client_size_params.rgrc[0].top    = non_client_size_params.rgrc[0].top    + OFFSET_DRAG_WINDOW;
-                non_client_size_params.rgrc[0].right  = non_client_size_params.rgrc[0].right  - OFFSET_DRAG_WINDOW;
-                non_client_size_params.rgrc[0].bottom = non_client_size_params.rgrc[0].bottom - OFFSET_DRAG_WINDOW;
+                non_client_size_params.rgrc[0].left   = non_client_size_params.rgrc[0].left   + BORDER_THICKNESS.left;
+                non_client_size_params.rgrc[0].right  = non_client_size_params.rgrc[0].right  - BORDER_THICKNESS.right;
+                non_client_size_params.rgrc[0].bottom = non_client_size_params.rgrc[0].bottom - BORDER_THICKNESS.bottom;
+                non_client_size_params.rgrc[0].top    = non_client_size_params.rgrc[0].top    + BORDER_THICKNESS.top;
 
                 // No need to pass the message on to the DefWindowProc.
                 // fCallDWP = false;
@@ -1163,12 +1201,10 @@ pub unsafe extern "system" fn callback(
             use winapi::um::dwmapi::DwmDefWindowProc;
             use self::winuser::{DefWindowProcW, ScreenToClient};
 
-            const BORDER_THICKNESS_TOP: i32 = 0;
-
             // Handle close / minimize / maximize / help button
             let mut hit_test_non_client_area: LRESULT = mem::zeroed();
 
-            if DwmDefWindowProc(window, msg, wparam, lparam, &mut hit_test_non_client_area) == 0 {
+            if DwmDefWindowProc(window, msg, wparam, lparam, &mut hit_test_non_client_area) != 0 {
                 return hit_test_non_client_area;
             }
 
@@ -1184,14 +1220,14 @@ pub unsafe extern "system" fn callback(
             let screen_to_client_result = ScreenToClient(window, &mut pt); // TODO: error checking?
 
             if screen_to_client_result == 0 {
-                println!("error: could not transform screen to client!");
+                error!("error: could not transform screen to client!");
             }
 
-            if pt.y < BORDER_THICKNESS_TOP {
+            if pt.y < BORDER_THICKNESS.top {
                 return winuser::HTTOP
             };
 
-            if pt.y < WINDOW_MARGINS.cyTopHeight {
+            if pt.y < WINDOW_MARGINS_DEFAULT.cyTopHeight {
                 return winuser::HTCAPTION
             };
 
@@ -1278,13 +1314,11 @@ fn enable_dwm_composition() -> Option<()> {
 fn force_window_resize(hwnd: HWND) -> Option<()> {
     use std::ptr;
 
-    println!("in function force_window_resize!");
-
     let mut window_rect: RECT = unsafe { mem::zeroed() };
     let window_result = unsafe { winuser::GetWindowRect(hwnd, &mut window_rect) };
 
     if window_result == 0  {
-        println!("Could not get window position for {:x}", hwnd as usize);
+        error!("Could not get window position for {:x}", hwnd as usize);
         return None;
     }
 
@@ -1297,7 +1331,7 @@ fn force_window_resize(hwnd: HWND) -> Option<()> {
     let set_window_pos_result = unsafe { winuser::SetWindowPos(hwnd, ptr::null_mut(), window_rect.left, window_rect.top, rect_width, rect_height, winuser::SWP_FRAMECHANGED) };
 
     if set_window_pos_result == 0 {
-        println!("Could not set window position of window {:x}", hwnd as usize);
+        error!("Could not set window position of window {:x}", hwnd as usize);
         return None;
     }
 
@@ -1307,33 +1341,12 @@ fn force_window_resize(hwnd: HWND) -> Option<()> {
     Some(())
 }
 
-use winapi::um::uxtheme::MARGINS;
-
-const LEFTEXTENDWIDTH: i32 = 8;
-const RIGHTEXTENDWIDTH: i32 = 8;
-const BOTTOMEXTENDWIDTH: i32 = 20;
-const TOPEXTENDWIDTH: i32 = 27;
-
-const WINDOW_MARGINS: MARGINS = MARGINS {
-    cxLeftWidth: LEFTEXTENDWIDTH,
-    cxRightWidth: RIGHTEXTENDWIDTH,
-    cyBottomHeight: BOTTOMEXTENDWIDTH,
-    cyTopHeight: TOPEXTENDWIDTH,
-};
-
-const WINDOW_MARGINS_2: MARGINS = MARGINS {
-    cxLeftWidth: -1,
-    cxRightWidth: -1,
-    cyBottomHeight: -1,
-    cyTopHeight: -1,
-};
-
 fn extend_into_client_area(hwnd: HWND) {
 
     use winapi::um::dwmapi::DwmExtendFrameIntoClientArea;
 
     // Extend the frame into the client area
-    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &WINDOW_MARGINS_2) };
+    let extend_frame_result = unsafe { DwmExtendFrameIntoClientArea(hwnd, &WINDOW_MARGINS_FULL) };
 
     if extend_frame_result != S_OK {
         error!("Could not extend window into client area: {:x}", hwnd as usize);
